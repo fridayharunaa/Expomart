@@ -34,6 +34,24 @@
 (define-constant ERR_INVALID_SEARCH_PARAMS (err u117))
 (define-constant MAX_CATEGORIES u50)
 (define-constant MAX_SEARCH_RESULTS u100)
+(define-constant ERR_DOCUMENT_NOT_FOUND (err u118))
+(define-constant ERR_DOCUMENT_EXPIRED (err u119))
+(define-constant ERR_INVALID_DOCUMENT (err u120))
+(define-constant ERR_DOCUMENT_EXISTS (err u121))
+(define-constant ERR_COMPLIANCE_NOT_MET (err u122))
+(define-constant ERR_VERIFICATION_FAILED (err u123))
+(define-constant ERR_INVALID_EXPIRY (err u124))
+(define-constant MAX_DOCUMENTS_PER_USER u25)
+(define-constant DOCUMENT_VALIDITY_PERIOD u52560)
+(define-constant COMPLIANCE_GRACE_PERIOD u1440)
+(define-constant ERR_MARKET_DATA_NOT_FOUND (err u125))
+(define-constant ERR_INVALID_TIMEFRAME (err u126))
+(define-constant ERR_INSUFFICIENT_DATA (err u127))
+(define-constant ERR_PRICE_ANALYSIS_FAILED (err u128))
+(define-constant MAX_PRICE_HISTORY_ENTRIES u100)
+(define-constant MIN_DATA_POINTS_FOR_ANALYSIS u5)
+(define-constant PRICE_VOLATILITY_THRESHOLD u20)
+(define-constant MARKET_ANALYSIS_WINDOW u4320)
 
 ;; data vars
 (define-data-var next-order-id uint u1)
@@ -42,6 +60,12 @@
 (define-data-var platform-treasury principal CONTRACT_OWNER)
 (define-data-var next-category-id uint u1)
 (define-data-var total-categories uint u0)
+(define-data-var next-document-id uint u1)
+(define-data-var next-compliance-id uint u1)
+(define-data-var total-documents uint u0)
+(define-data-var next-market-entry-id uint u1)
+(define-data-var next-price-alert-id uint u1)
+(define-data-var market-analysis-last-updated uint u0)
 
 ;; data maps
 (define-map export-orders
@@ -168,6 +192,153 @@
 (define-map trending-categories
   { period: (string-ascii 20), rank: uint }
   { category-id: uint, score: uint }
+)
+
+(define-map trade-documents
+  { document-id: uint }
+  {
+    owner: principal,
+    document-type: (string-ascii 50),
+    document-hash: (string-ascii 64),
+    issuer: (string-ascii 100),
+    issue-date: uint,
+    expiry-date: uint,
+    status: (string-ascii 20),
+    verification-status: (string-ascii 20),
+    created-at: uint,
+    last-updated: uint
+  }
+)
+
+(define-map user-documents
+  { user: principal, document-type: (string-ascii 50) }
+  { document-id: uint, is-active: bool }
+)
+
+(define-map compliance-requirements
+  { compliance-id: uint }
+  {
+    category-id: uint,
+    destination-country: (string-ascii 50),
+    required-documents: (string-ascii 200),
+    mandatory: bool,
+    created-by: principal,
+    created-at: uint,
+    is-active: bool
+  }
+)
+
+(define-map order-compliance
+  { order-id: uint }
+  {
+    compliance-status: (string-ascii 20),
+    required-docs-count: uint,
+    verified-docs-count: uint,
+    last-check: uint,
+    compliance-deadline: uint,
+    verification-notes: (string-ascii 300)
+  }
+)
+
+(define-map document-verifications
+  { document-id: uint, verifier: principal }
+  {
+    verification-date: uint,
+    verification-result: bool,
+    verification-notes: (string-ascii 200),
+    verifier-reputation: uint
+  }
+)
+
+(define-map expired-documents-tracker
+  { owner: principal, month: uint }
+  { expired-count: uint, total-documents: uint }
+)
+
+(define-map market-price-history
+  { category-id: uint, region: (string-ascii 50), period: uint }
+  {
+    average-price: uint,
+    min-price: uint,
+    max-price: uint,
+    total-orders: uint,
+    total-volume: uint,
+    period-start: uint,
+    period-end: uint,
+    last-updated: uint
+  }
+)
+
+(define-map price-trend-analysis
+  { category-id: uint, region: (string-ascii 50) }
+  {
+    current-avg-price: uint,
+    previous-avg-price: uint,
+    price-change-percent: uint,
+    volatility-score: uint,
+    trend-direction: (string-ascii 20),
+    confidence-level: uint,
+    data-points: uint,
+    last-analysis: uint
+  }
+)
+
+(define-map market-insights
+  { insight-id: uint }
+  {
+    category-id: uint,
+    region: (string-ascii 50),
+    insight-type: (string-ascii 30),
+    title: (string-ascii 100),
+    description: (string-ascii 300),
+    impact-score: uint,
+    generated-at: uint,
+    expires-at: uint,
+    is-active: bool
+  }
+)
+
+(define-map price-recommendations
+  { category-id: uint, region: (string-ascii 50), price-tier: uint }
+  {
+    recommended-min-price: uint,
+    recommended-max-price: uint,
+    success-probability: uint,
+    market-position: (string-ascii 20),
+    reasoning: (string-ascii 200),
+    based-on-orders: uint,
+    last-updated: uint
+  }
+)
+
+(define-map regional-market-stats
+  { region: (string-ascii 50), category-id: uint }
+  {
+    active-exporters: uint,
+    active-buyers: uint,
+    avg-order-value: uint,
+    total-transactions: uint,
+    market-activity-score: uint,
+    seasonal-factor: uint,
+    competition-level: uint,
+    last-calculated: uint
+  }
+)
+
+(define-map price-alerts
+  { alert-id: uint }
+  {
+    user: principal,
+    category-id: uint,
+    region: (string-ascii 50),
+    target-price: uint,
+    alert-type: (string-ascii 20),
+    trigger-condition: (string-ascii 30),
+    is-triggered: bool,
+    created-at: uint,
+    triggered-at: (optional uint),
+    is-active: bool
+  }
 )
 
 ;; public functions
@@ -572,6 +743,417 @@
   )
 )
 
+(define-public (upload-trade-document (document-type (string-ascii 50)) (document-hash (string-ascii 64)) (issuer (string-ascii 100)) (expiry-duration uint))
+  (let
+    (
+      (document-id (var-get next-document-id))
+      (current-docs (var-get total-documents))
+      (user-doc-count (get-user-document-count tx-sender))
+      (expiry-date (+ stacks-block-height expiry-duration))
+    )
+    (asserts! (< user-doc-count MAX_DOCUMENTS_PER_USER) ERR_INVALID_DOCUMENT)
+    (asserts! (> expiry-duration u0) ERR_INVALID_EXPIRY)
+    (asserts! (< expiry-duration DOCUMENT_VALIDITY_PERIOD) ERR_INVALID_EXPIRY)
+    (asserts! (> (len document-type) u0) ERR_INVALID_DOCUMENT)
+    (asserts! (> (len document-hash) u0) ERR_INVALID_DOCUMENT)
+    
+    (asserts! (is-none (map-get? user-documents { user: tx-sender, document-type: document-type })) ERR_DOCUMENT_EXISTS)
+    
+    (map-set trade-documents
+      { document-id: document-id }
+      {
+        owner: tx-sender,
+        document-type: document-type,
+        document-hash: document-hash,
+        issuer: issuer,
+        issue-date: stacks-block-height,
+        expiry-date: expiry-date,
+        status: "pending",
+        verification-status: "unverified",
+        created-at: stacks-block-height,
+        last-updated: stacks-block-height
+      }
+    )
+    
+    (map-set user-documents
+      { user: tx-sender, document-type: document-type }
+      { document-id: document-id, is-active: true }
+    )
+    
+    (var-set next-document-id (+ document-id u1))
+    (var-set total-documents (+ current-docs u1))
+    (ok document-id)
+  )
+)
+
+(define-public (verify-document (document-id uint) (verification-result bool) (verification-notes (string-ascii 200)))
+  (let
+    (
+      (document (unwrap! (map-get? trade-documents { document-id: document-id }) ERR_DOCUMENT_NOT_FOUND))
+      (verifier-rep (get average-rating (get-user-reputation tx-sender)))
+    )
+    (asserts! (not (is-eq tx-sender (get owner document))) ERR_NOT_AUTHORIZED)
+    (asserts! (< stacks-block-height (get expiry-date document)) ERR_DOCUMENT_EXPIRED)
+    (asserts! (is-eq (get status document) "pending") ERR_INVALID_DOCUMENT)
+    (asserts! (>= verifier-rep u3) ERR_NOT_AUTHORIZED)
+    
+    (map-set document-verifications
+      { document-id: document-id, verifier: tx-sender }
+      {
+        verification-date: stacks-block-height,
+        verification-result: verification-result,
+        verification-notes: verification-notes,
+        verifier-reputation: verifier-rep
+      }
+    )
+    
+    (map-set trade-documents
+      { document-id: document-id }
+      (merge document {
+        status: (if verification-result "verified" "rejected"),
+        verification-status: (if verification-result "verified" "failed"),
+        last-updated: stacks-block-height
+      })
+    )
+    
+    (ok true)
+  )
+)
+
+(define-public (update-document-status (document-id uint) (new-status (string-ascii 20)))
+  (let
+    (
+      (document (unwrap! (map-get? trade-documents { document-id: document-id }) ERR_DOCUMENT_NOT_FOUND))
+    )
+    (asserts! (is-eq tx-sender (get owner document)) ERR_NOT_AUTHORIZED)
+    (asserts! (or (is-eq new-status "active") (is-eq new-status "inactive") (is-eq new-status "renewed")) ERR_INVALID_DOCUMENT)
+    
+    (map-set trade-documents
+      { document-id: document-id }
+      (merge document {
+        status: new-status,
+        last-updated: stacks-block-height
+      })
+    )
+    
+    (ok true)
+  )
+)
+
+(define-public (create-compliance-requirement (category-id uint) (destination-country (string-ascii 50)) (required-documents (string-ascii 200)) (mandatory bool))
+  (let
+    (
+      (compliance-id (var-get next-compliance-id))
+      (category (unwrap! (map-get? product-categories { category-id: category-id }) ERR_CATEGORY_NOT_FOUND))
+    )
+    (asserts! (is-contract-owner) ERR_NOT_AUTHORIZED)
+    (asserts! (get is-active category) ERR_INVALID_CATEGORY)
+    (asserts! (> (len destination-country) u0) ERR_INVALID_SEARCH_PARAMS)
+    (asserts! (> (len required-documents) u0) ERR_INVALID_SEARCH_PARAMS)
+    
+    (map-set compliance-requirements
+      { compliance-id: compliance-id }
+      {
+        category-id: category-id,
+        destination-country: destination-country,
+        required-documents: required-documents,
+        mandatory: mandatory,
+        created-by: tx-sender,
+        created-at: stacks-block-height,
+        is-active: true
+      }
+    )
+    
+    (var-set next-compliance-id (+ compliance-id u1))
+    (ok compliance-id)
+  )
+)
+
+(define-public (check-order-compliance (order-id uint))
+  (let
+    (
+      (order (unwrap! (map-get? export-orders { order-id: order-id }) ERR_ORDER_NOT_FOUND))
+      (compliance-deadline (+ (get deadline order) COMPLIANCE_GRACE_PERIOD))
+      (doc-count (count-verified-documents-for-order order-id (get category-id order)))
+    )
+    (asserts! (is-eq tx-sender (get exporter order)) ERR_NOT_AUTHORIZED)
+    (asserts! (is-eq (get status order) "active") ERR_ORDER_CLOSED)
+    
+    (map-set order-compliance
+      { order-id: order-id }
+      {
+        compliance-status: (if (>= (get verified doc-count) (get required doc-count)) "compliant" "pending"),
+        required-docs-count: (get required doc-count),
+        verified-docs-count: (get verified doc-count),
+        last-check: stacks-block-height,
+        compliance-deadline: compliance-deadline,
+        verification-notes: "System check completed"
+      }
+    )
+    
+    (ok { required: (get required doc-count), verified: (get verified doc-count) })
+  )
+)
+
+(define-public (track-expired-documents)
+  (let
+    (
+      (current-month (/ stacks-block-height u4320))
+      (user-docs (get-user-document-count tx-sender))
+      (expired-docs (count-expired-documents tx-sender))
+    )
+    
+    (map-set expired-documents-tracker
+      { owner: tx-sender, month: current-month }
+      { expired-count: expired-docs, total-documents: user-docs }
+    )
+    
+    (ok { total: user-docs, expired: expired-docs })
+  )
+)
+
+(define-public (renew-document (document-id uint) (new-expiry-duration uint))
+  (let
+    (
+      (document (unwrap! (map-get? trade-documents { document-id: document-id }) ERR_DOCUMENT_NOT_FOUND))
+      (new-expiry-date (+ stacks-block-height new-expiry-duration))
+    )
+    (asserts! (is-eq tx-sender (get owner document)) ERR_NOT_AUTHORIZED)
+    (asserts! (> new-expiry-duration u0) ERR_INVALID_EXPIRY)
+    (asserts! (< new-expiry-duration DOCUMENT_VALIDITY_PERIOD) ERR_INVALID_EXPIRY)
+    (asserts! (is-eq (get verification-status document) "verified") ERR_VERIFICATION_FAILED)
+    
+    (map-set trade-documents
+      { document-id: document-id }
+      (merge document {
+        expiry-date: new-expiry-date,
+        status: "renewed",
+        last-updated: stacks-block-height
+      })
+    )
+    
+    (ok new-expiry-date)
+  )
+)
+
+(define-public (record-market-price (category-id uint) (region (string-ascii 50)) (price uint) (order-count uint) (volume uint))
+  (let
+    (
+      (current-period (/ stacks-block-height u4320))
+      (existing-data (map-get? market-price-history { category-id: category-id, region: region, period: current-period }))
+    )
+    (asserts! (is-contract-owner) ERR_NOT_AUTHORIZED)
+    (asserts! (> price u0) ERR_INVALID_AMOUNT)
+    (asserts! (> order-count u0) ERR_INVALID_AMOUNT)
+    
+    (match existing-data
+      current-data (map-set market-price-history
+        { category-id: category-id, region: region, period: current-period }
+        {
+          average-price: (/ (+ (* (get average-price current-data) (get total-orders current-data)) (* price order-count)) (+ (get total-orders current-data) order-count)),
+          min-price: (if (< price (get min-price current-data)) price (get min-price current-data)),
+          max-price: (if (> price (get max-price current-data)) price (get max-price current-data)),
+          total-orders: (+ (get total-orders current-data) order-count),
+          total-volume: (+ (get total-volume current-data) volume),
+          period-start: (get period-start current-data),
+          period-end: stacks-block-height,
+          last-updated: stacks-block-height
+        }
+      )
+      (map-set market-price-history
+        { category-id: category-id, region: region, period: current-period }
+        {
+          average-price: price,
+          min-price: price,
+          max-price: price,
+          total-orders: order-count,
+          total-volume: volume,
+          period-start: stacks-block-height,
+          period-end: stacks-block-height,
+          last-updated: stacks-block-height
+        }
+      )
+    )
+    
+    (ok true)
+  )
+)
+
+(define-public (generate-price-trend-analysis (category-id uint) (region (string-ascii 50)))
+  (let
+    (
+      (current-period (/ stacks-block-height u4320))
+      (previous-period (- current-period u1))
+      (current-data (map-get? market-price-history { category-id: category-id, region: region, period: current-period }))
+      (previous-data (map-get? market-price-history { category-id: category-id, region: region, period: previous-period }))
+    )
+    (asserts! (is-some current-data) ERR_INSUFFICIENT_DATA)
+    (asserts! (is-some previous-data) ERR_INSUFFICIENT_DATA)
+    
+    (let
+      (
+        (current-price (get average-price (unwrap-panic current-data)))
+        (previous-price (get average-price (unwrap-panic previous-data)))
+        (price-change (if (> current-price previous-price) 
+          (/ (* (- current-price previous-price) u100) previous-price)
+          (/ (* (- previous-price current-price) u100) previous-price)
+        ))
+        (volatility (calculate-price-volatility category-id region))
+        (trend-dir (if (> current-price previous-price) "rising" "falling"))
+        (data-points (+ (get total-orders (unwrap-panic current-data)) (get total-orders (unwrap-panic previous-data))))
+        (confidence (if (>= data-points MIN_DATA_POINTS_FOR_ANALYSIS) u85 u45))
+      )
+      
+      (map-set price-trend-analysis
+        { category-id: category-id, region: region }
+        {
+          current-avg-price: current-price,
+          previous-avg-price: previous-price,
+          price-change-percent: price-change,
+          volatility-score: volatility,
+          trend-direction: trend-dir,
+          confidence-level: confidence,
+          data-points: data-points,
+          last-analysis: stacks-block-height
+        }
+      )
+      
+      (var-set market-analysis-last-updated stacks-block-height)
+      (ok { price-change: price-change, trend: trend-dir, confidence: confidence })
+    )
+  )
+)
+
+(define-public (generate-price-recommendation (category-id uint) (region (string-ascii 50)) (desired-tier uint))
+  (let
+    (
+      (trend-data (map-get? price-trend-analysis { category-id: category-id, region: region }))
+      (market-stats (map-get? regional-market-stats { region: region, category-id: category-id }))
+    )
+    (asserts! (is-some trend-data) ERR_MARKET_DATA_NOT_FOUND)
+    (asserts! (<= desired-tier u3) ERR_INVALID_AMOUNT)
+    
+    (let
+      (
+        (base-price (get current-avg-price (unwrap-panic trend-data)))
+        (volatility (get volatility-score (unwrap-panic trend-data)))
+        (competition-level (match market-stats
+          stats (get competition-level stats)
+          u50
+        ))
+        (tier-multiplier (if (is-eq desired-tier u1) 
+          u85
+          (if (is-eq desired-tier u2) u100 u115)
+        ))
+        (recommended-min (/ (* base-price tier-multiplier) u100))
+        (recommended-max (/ (* base-price (+ tier-multiplier u15)) u100))
+        (success-prob (calculate-success-probability volatility competition-level desired-tier))
+        (position (if (is-eq desired-tier u1) "budget" (if (is-eq desired-tier u2) "standard" "premium")))
+        (reasoning "Based on market trends and competition analysis")
+      )
+      
+      (map-set price-recommendations
+        { category-id: category-id, region: region, price-tier: desired-tier }
+        {
+          recommended-min-price: recommended-min,
+          recommended-max-price: recommended-max,
+          success-probability: success-prob,
+          market-position: position,
+          reasoning: reasoning,
+          based-on-orders: (get data-points (unwrap-panic trend-data)),
+          last-updated: stacks-block-height
+        }
+      )
+      
+      (ok { min-price: recommended-min, max-price: recommended-max, success-rate: success-prob })
+    )
+  )
+)
+
+(define-public (create-price-alert (category-id uint) (region (string-ascii 50)) (target-price uint) (alert-type (string-ascii 20)) (condition (string-ascii 30)))
+  (let
+    (
+      (alert-id (var-get next-price-alert-id))
+    )
+    (asserts! (> target-price u0) ERR_INVALID_AMOUNT)
+    
+    (map-set price-alerts
+      { alert-id: alert-id }
+      {
+        user: tx-sender,
+        category-id: category-id,
+        region: region,
+        target-price: target-price,
+        alert-type: alert-type,
+        trigger-condition: condition,
+        is-triggered: false,
+        created-at: stacks-block-height,
+        triggered-at: none,
+        is-active: true
+      }
+    )
+    
+    (var-set next-price-alert-id (+ alert-id u1))
+    (ok alert-id)
+  )
+)
+
+(define-public (update-regional-market-stats (region (string-ascii 50)) (category-id uint) (exporters uint) (buyers uint) (avg-value uint) (transactions uint))
+  (let
+    (
+      (activity-score (calculate-market-activity-score exporters buyers transactions))
+      (seasonal-factor (calculate-seasonal-factor stacks-block-height))
+      (competition-score (calculate-competition-level exporters transactions))
+    )
+    (asserts! (is-contract-owner) ERR_NOT_AUTHORIZED)
+    
+    (map-set regional-market-stats
+      { region: region, category-id: category-id }
+      {
+        active-exporters: exporters,
+        active-buyers: buyers,
+        avg-order-value: avg-value,
+        total-transactions: transactions,
+        market-activity-score: activity-score,
+        seasonal-factor: seasonal-factor,
+        competition-level: competition-score,
+        last-calculated: stacks-block-height
+      }
+    )
+    
+    (ok true)
+  )
+)
+
+(define-public (generate-market-insight (category-id uint) (region (string-ascii 50)) (insight-type (string-ascii 30)) (title (string-ascii 100)) (description (string-ascii 300)) (impact uint))
+  (let
+    (
+      (insight-id (var-get next-market-entry-id))
+      (expires-at (+ stacks-block-height u17280))
+    )
+    (asserts! (is-contract-owner) ERR_NOT_AUTHORIZED)
+    (asserts! (<= impact u100) ERR_INVALID_AMOUNT)
+    
+    (map-set market-insights
+      { insight-id: insight-id }
+      {
+        category-id: category-id,
+        region: region,
+        insight-type: insight-type,
+        title: title,
+        description: description,
+        impact-score: impact,
+        generated-at: stacks-block-height,
+        expires-at: expires-at,
+        is-active: true
+      }
+    )
+    
+    (var-set next-market-entry-id (+ insight-id u1))
+    (ok insight-id)
+  )
+)
+
 ;; read only functions
 
 (define-read-only (get-export-order (order-id uint))
@@ -721,6 +1303,135 @@
       })
     )
     none
+  )
+)
+
+(define-read-only (get-trade-document (document-id uint))
+  (map-get? trade-documents { document-id: document-id })
+)
+
+(define-read-only (get-user-document (user principal) (document-type (string-ascii 50)))
+  (map-get? user-documents { user: user, document-type: document-type })
+)
+
+(define-read-only (get-compliance-requirement (compliance-id uint))
+  (map-get? compliance-requirements { compliance-id: compliance-id })
+)
+
+(define-read-only (get-order-compliance-status (order-id uint))
+  (map-get? order-compliance { order-id: order-id })
+)
+
+(define-read-only (get-document-verification (document-id uint) (verifier principal))
+  (map-get? document-verifications { document-id: document-id, verifier: verifier })
+)
+
+(define-read-only (get-expired-documents-summary (owner principal) (month uint))
+  (map-get? expired-documents-tracker { owner: owner, month: month })
+)
+
+(define-read-only (get-total-documents)
+  (var-get total-documents)
+)
+
+(define-read-only (get-next-document-id)
+  (var-get next-document-id)
+)
+
+(define-read-only (get-next-compliance-id)
+  (var-get next-compliance-id)
+)
+
+(define-read-only (is-document-expired (document-id uint))
+  (match (map-get? trade-documents { document-id: document-id })
+    document (>= stacks-block-height (get expiry-date document))
+    false
+  )
+)
+
+(define-read-only (is-document-verified (document-id uint))
+  (match (map-get? trade-documents { document-id: document-id })
+    document (is-eq (get verification-status document) "verified")
+    false
+  )
+)
+
+(define-read-only (get-document-days-until-expiry (document-id uint))
+  (match (map-get? trade-documents { document-id: document-id })
+    document (if (> (get expiry-date document) stacks-block-height)
+      (- (get expiry-date document) stacks-block-height)
+      u0
+    )
+    u0
+  )
+)
+
+(define-read-only (get-market-price-history (category-id uint) (region (string-ascii 50)) (period uint))
+  (map-get? market-price-history { category-id: category-id, region: region, period: period })
+)
+
+(define-read-only (get-price-trend-analysis (category-id uint) (region (string-ascii 50)))
+  (map-get? price-trend-analysis { category-id: category-id, region: region })
+)
+
+(define-read-only (get-price-recommendation (category-id uint) (region (string-ascii 50)) (price-tier uint))
+  (map-get? price-recommendations { category-id: category-id, region: region, price-tier: price-tier })
+)
+
+(define-read-only (get-regional-market-stats (region (string-ascii 50)) (category-id uint))
+  (map-get? regional-market-stats { region: region, category-id: category-id })
+)
+
+(define-read-only (get-market-insight (insight-id uint))
+  (map-get? market-insights { insight-id: insight-id })
+)
+
+(define-read-only (get-price-alert (alert-id uint))
+  (map-get? price-alerts { alert-id: alert-id })
+)
+
+(define-read-only (get-current-market-period)
+  (/ stacks-block-height u4320)
+)
+
+(define-read-only (get-market-analysis-status)
+  {
+    last-updated: (var-get market-analysis-last-updated),
+    current-period: (get-current-market-period),
+    next-market-entry-id: (var-get next-market-entry-id),
+    next-alert-id: (var-get next-price-alert-id)
+  }
+)
+
+(define-read-only (calculate-market-score (category-id uint) (region (string-ascii 50)))
+  (let
+    (
+      (trend-data (map-get? price-trend-analysis { category-id: category-id, region: region }))
+      (market-stats (map-get? regional-market-stats { region: region, category-id: category-id }))
+    )
+    (match trend-data
+      trend (match market-stats
+        stats {
+          market-activity: (get market-activity-score stats),
+          price-stability: (- u100 (get volatility-score trend)),
+          competition-intensity: (get competition-level stats),
+          trend-strength: (get confidence-level trend),
+          overall-score: (/ (+ (get market-activity-score stats) (- u100 (get volatility-score trend)) (get confidence-level trend)) u3)
+        }
+        { market-activity: u0, price-stability: u50, competition-intensity: u50, trend-strength: u0, overall-score: u25 }
+      )
+      { market-activity: u0, price-stability: u50, competition-intensity: u50, trend-strength: u0, overall-score: u25 }
+    )
+  )
+)
+
+(define-read-only (is-price-alert-triggered (alert-id uint))
+  (match (map-get? price-alerts { alert-id: alert-id })
+    alert (and 
+      (get is-active alert)
+      (not (get is-triggered alert))
+    )
+    false
   )
 )
 
@@ -877,3 +1588,170 @@
     (ok true)
   )
 )
+
+(define-private (get-user-document-count (user principal))
+  (let
+    (
+      (doc-types (list "export-license" "origin-certificate" "quality-certificate" "customs-declaration" "phytosanitary-certificate"))
+    )
+    (fold count-user-docs-by-type doc-types u0)
+  )
+)
+
+(define-private (count-user-docs-by-type (doc-type (string-ascii 50)) (acc uint))
+  (match (map-get? user-documents { user: tx-sender, document-type: doc-type })
+    user-doc (if (get is-active user-doc) (+ acc u1) acc)
+    acc
+  )
+)
+
+(define-private (count-expired-documents (user principal))
+  (let
+    (
+      (doc-types (list "export-license" "origin-certificate" "quality-certificate" "customs-declaration" "phytosanitary-certificate"))
+    )
+    (fold count-expired-docs-by-type doc-types u0)
+  )
+)
+
+(define-private (count-expired-docs-by-type (doc-type (string-ascii 50)) (acc uint))
+  (match (map-get? user-documents { user: tx-sender, document-type: doc-type })
+    user-doc (match (map-get? trade-documents { document-id: (get document-id user-doc) })
+      document (if (>= stacks-block-height (get expiry-date document)) (+ acc u1) acc)
+      acc
+    )
+    acc
+  )
+)
+
+(define-private (count-verified-documents-for-order (order-id uint) (category-id uint))
+  (let
+    (
+      (required-docs u2)
+      (verified-docs u1)
+    )
+    { required: required-docs, verified: verified-docs }
+  )
+)
+
+(define-private (validate-document-type (doc-type (string-ascii 50)))
+  (or 
+    (is-eq doc-type "export-license")
+    (or 
+      (is-eq doc-type "origin-certificate")
+      (or 
+        (is-eq doc-type "quality-certificate")
+        (or 
+          (is-eq doc-type "customs-declaration")
+          (is-eq doc-type "phytosanitary-certificate")
+        )
+      )
+    )
+  )
+)
+
+(define-private (is-compliance-met (order-id uint))
+  (match (map-get? order-compliance { order-id: order-id })
+    compliance (is-eq (get compliance-status compliance) "compliant")
+    false
+  )
+)
+
+(define-private (calculate-compliance-score (verified-count uint) (required-count uint))
+  (if (> required-count u0)
+    (/ (* verified-count u100) required-count)
+    u100
+  )
+)
+
+(define-private (calculate-price-volatility (category-id uint) (region (string-ascii 50)))
+  (let
+    (
+      (current-period (/ stacks-block-height u4320))
+      (periods-to-check (list u0 u1 u2 u3 u4))
+      (volatility-sum (fold sum-price-volatility periods-to-check { category: category-id, region: region, sum: u0, count: u0 }))
+    )
+    (if (> (get count volatility-sum) u0)
+      (/ (get sum volatility-sum) (get count volatility-sum))
+      u50
+    )
+  )
+)
+
+(define-private (sum-price-volatility (period-offset uint) (acc { category: uint, region: (string-ascii 50), sum: uint, count: uint }))
+  (let
+    (
+      (current-period (/ stacks-block-height u4320))
+      (check-period (- current-period period-offset))
+      (price-data (map-get? market-price-history { category-id: (get category acc), region: (get region acc), period: check-period }))
+    )
+    (match price-data
+      data (let
+        (
+          (price-range (if (> (get max-price data) u0) (/ (* (- (get max-price data) (get min-price data)) u100) (get max-price data)) u0))
+        )
+        {
+          category: (get category acc),
+          region: (get region acc),
+          sum: (+ (get sum acc) price-range),
+          count: (+ (get count acc) u1)
+        }
+      )
+      acc
+    )
+  )
+)
+
+(define-private (calculate-success-probability (volatility uint) (competition uint) (tier uint))
+  (let
+    (
+      (volatility-factor (if (> volatility PRICE_VOLATILITY_THRESHOLD) u70 u85))
+      (competition-factor (if (> competition u70) u75 u90))
+      (tier-factor (if (is-eq tier u1) u95 (if (is-eq tier u2) u85 u70)))
+    )
+    (/ (+ volatility-factor competition-factor tier-factor) u3)
+  )
+)
+
+(define-private (calculate-market-activity-score (exporters uint) (buyers uint) (transactions uint))
+  (let
+    (
+      (user-activity (+ exporters buyers))
+      (transaction-factor (if (> transactions u0) (if (< (/ transactions u2) u50) (/ transactions u2) u50) u0))
+      (user-factor (if (> user-activity u0) (if (< (/ user-activity u2) u50) (/ user-activity u2) u50) u0))
+    )
+    (+ transaction-factor user-factor)
+  )
+)
+
+(define-private (calculate-seasonal-factor (current-block uint))
+  (let
+    (
+      (month-equivalent (mod (/ current-block u4320) u12))
+    )
+    (if (or (is-eq month-equivalent u11) (is-eq month-equivalent u0) (is-eq month-equivalent u1))
+      u110
+      (if (or (is-eq month-equivalent u5) (is-eq month-equivalent u6) (is-eq month-equivalent u7))
+        u95
+        u100
+      )
+    )
+  )
+)
+
+(define-private (calculate-competition-level (exporters uint) (transactions uint))
+  (let
+    (
+      (competition-ratio (if (> transactions u0) (/ exporters transactions) u0))
+    )
+    (if (> competition-ratio u2)
+      u80
+      (if (> competition-ratio u1)
+        u60
+        u40
+      )
+    )
+  )
+)
+
+
